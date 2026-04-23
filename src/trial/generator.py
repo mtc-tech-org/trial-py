@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from .config import get_provider
@@ -45,7 +50,6 @@ _TEST_TEMPLATE = '''\
 #
 # Replace `your_agent(USER_MSG)` with your actual agent call before running.
 
-import pytest
 from trial import Trial, configure
 from trial.providers import AnthropicProvider
 
@@ -78,6 +82,11 @@ def _safe_id(session_id: str | None) -> str:
     return re.sub(r"[^a-zA-Z0-9]", "_", session_id)
 
 
+def _unique_branch_suffix() -> str:
+    """UTC timestamp suffix for collision-safe branch names."""
+    return datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+
+
 def _render_test(
     user_message: str,
     session_id: str | None,
@@ -101,6 +110,74 @@ def _render_test(
         checks=checks,
         judge_criterion_repr=repr(judge_criterion),
     )
+
+
+def _get_github_repo(repo_path: str) -> tuple[str, str]:
+    """Parse owner and repo name from the git remote origin URL."""
+    result = subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    url = result.stdout.strip()
+    m = re.match(r"https://github\.com/([^/]+)/([^/]+?)(?:\.git)?$", url)
+    if m:
+        return m.group(1), m.group(2)
+    m = re.match(r"git@github\.com:([^/]+)/([^/]+?)(?:\.git)?$", url)
+    if m:
+        return m.group(1), m.group(2)
+    raise ValueError(f"Could not parse GitHub owner/repo from remote URL: {url!r}")
+
+
+def _git(args: list[str], repo_path: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git"] + args,
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"git {' '.join(args)} failed: {e.stderr.strip() or e.stdout.strip()}"
+        ) from e
+
+
+def _create_github_pr(
+    owner: str,
+    repo: str,
+    token: str,
+    head: str,
+    base: str,
+    title: str,
+    body: str,
+) -> str:
+    """Create a GitHub PR via the REST API and return the PR URL."""
+    url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
+    payload = json.dumps({"title": title, "head": head, "base": base, "body": body}).encode()
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body_text = e.read().decode(errors="replace")
+        raise RuntimeError(
+            f"GitHub API error {e.code}: {body_text}"
+        ) from e
+    return data["html_url"]
 
 
 def generate_regression_test(
@@ -176,3 +253,93 @@ def generate_regression_test(
             f.write(code)
 
     return code
+
+
+def create_regression_pr(
+    user_message: str,
+    response: str,
+    *,
+    github_token: str,
+    session_id: str | None = None,
+    metrics: dict[str, float] | None = None,
+    tool_calls: list | None = None,
+    error: str | Exception | None = None,
+    provider: BaseProvider | None = None,
+    repo_path: str = ".",
+    tests_dir: str = "tests",
+    base_branch: str = "main",
+) -> str:
+    """Analyze a failed execution, commit a regression test, and open a GitHub PR.
+
+    Wraps generate_regression_test() with git branch creation, commit, push,
+    and PR creation. Requires a GitHub personal access token with repo scope.
+
+    Args:
+        user_message: The original input sent to the agent.
+        response: The agent's response text.
+        github_token: GitHub personal access token (repo scope).
+        session_id: Optional session identifier — used in branch name, file name, and PR title.
+        metrics: Optional timing metrics.
+        tool_calls: Optional list of ToolCall objects.
+        error: Optional error that occurred during execution.
+        provider: LLM provider for analysis. Falls back to configure(provider=...).
+        repo_path: Local path to the git repository. Defaults to current directory.
+        tests_dir: Directory to write the test file into. Defaults to "tests".
+        base_branch: Branch to open the PR against. Defaults to "main".
+
+    Returns:
+        The URL of the created GitHub PR.
+    """
+    safe = _safe_id(session_id)
+    # Always append a timestamp so re-runs of the same session don't collide
+    branch = f"trial/regression/{safe}-{_unique_branch_suffix()}"
+    filename = f"test_regression_{safe}.py"
+    file_path = os.path.join(repo_path, tests_dir, filename)
+
+    # Ensure tests directory exists
+    os.makedirs(os.path.join(repo_path, tests_dir), exist_ok=True)
+
+    # Generate the test file
+    generate_regression_test(
+        user_message=user_message,
+        response=response,
+        session_id=session_id,
+        metrics=metrics,
+        tool_calls=tool_calls,
+        error=error,
+        provider=provider,
+        output_path=file_path,
+    )
+
+    # Detect GitHub owner/repo from remote
+    owner, repo = _get_github_repo(repo_path)
+
+    # Create branch, commit, push
+    _git(["checkout", "-b", branch], repo_path)
+    _git(["add", file_path], repo_path)
+    _git(
+        ["commit", "-m", f"regression: add test for session {session_id or 'unknown'}"],
+        repo_path,
+    )
+    _git(["push", "-u", "origin", branch], repo_path)
+
+    # Open the PR
+    title = f"Regression test: session {session_id}" if session_id else "Regression test"
+    pr_body = (
+        f"Automated regression test generated by [trial](https://github.com/mtc-tech-org/trial-py).\n\n"
+        f"**Session:** `{session_id or 'unknown'}`\n\n"
+        f"**Test file:** `{os.path.join(tests_dir, filename)}`\n\n"
+        f"Before merging, replace `your_agent(USER_MSG)` in the test file with your actual agent call."
+    )
+
+    pr_url = _create_github_pr(
+        owner=owner,
+        repo=repo,
+        token=github_token,
+        head=branch,
+        base=base_branch,
+        title=title,
+        body=pr_body,
+    )
+
+    return pr_url
