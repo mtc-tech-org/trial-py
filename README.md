@@ -256,6 +256,18 @@ It's about verifying behavior.
 
 ---
 
+## Limits
+
+Trial helps you verify and improve agent behavior, but it does not guarantee correctness.
+
+- Passing tests means the agent satisfied your defined criteria — not that it is universally correct
+- LLM judges are probabilistic and can be wrong
+- Coverage depends on the quality and breadth of your tests
+
+Trial is best used to catch regressions, enforce expected behavior, and improve consistency over time. Not to prove absolute correctness.
+
+---
+
 ## License
 
 MIT
