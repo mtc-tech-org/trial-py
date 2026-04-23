@@ -6,7 +6,7 @@ import pytest
 
 import trial.config as cfg
 from trial import generate_regression_test, create_regression_pr
-from trial.generator import _get_github_repo, _safe_id
+from trial.generator import _get_github_repo, _safe_id, _unique_branch_suffix
 from trial.providers.base import BaseProvider
 from trial.tools import ToolCall
 
@@ -301,13 +301,10 @@ def test_create_regression_pr_full_flow(monkeypatch, tmp_path):
     """Full flow with all external calls monkeypatched."""
     import subprocess
     import urllib.request
-    import trial.generator as gen
 
-    # Fake git remote
     class FakeRemoteResult:
         stdout = "https://github.com/acme/my-repo.git\n"
 
-    # Track git calls
     git_calls = []
 
     def fake_run(cmd, **kwargs):
@@ -317,9 +314,6 @@ def test_create_regression_pr_full_flow(monkeypatch, tmp_path):
         return r
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-
-    # Fake GitHub API
-    pr_responses = []
 
     class FakeHTTPResponse:
         def __init__(self):
@@ -336,7 +330,6 @@ def test_create_regression_pr_full_flow(monkeypatch, tmp_path):
 
     monkeypatch.setattr(urllib.request, "urlopen", lambda req: FakeHTTPResponse())
 
-    # Fake provider
     cfg._default_provider = FakeProvider()
 
     try:
@@ -358,9 +351,100 @@ def test_create_regression_pr_full_flow(monkeypatch, tmp_path):
     test_file = tmp_path / "tests" / "test_regression_sess_42.py"
     assert test_file.exists()
 
-    # Verify git was used to create branch, add, commit, push
+    # Verify git was used to create branch (with timestamp suffix), add, commit, push
     cmds = [" ".join(c) for c in git_calls]
-    assert any("checkout" in c and "trial/regression" in c for c in cmds)
+    assert any("checkout" in c and "trial/regression/sess_42" in c for c in cmds)
     assert any("add" in c for c in cmds)
     assert any("commit" in c for c in cmds)
     assert any("push" in c for c in cmds)
+
+
+def test_generated_file_has_no_unused_imports():
+    """The generated test file should not import pytest (it's not used)."""
+    cfg._default_provider = FakeProvider()
+    try:
+        code = generate_regression_test(USER_MSG, RESPONSE)
+        assert "import pytest" not in code
+    finally:
+        cfg._default_provider = None
+
+
+def test_branch_has_timestamp_suffix(monkeypatch):
+    """Branch names always include a timestamp to prevent collisions."""
+    monkeypatch.setattr("trial.generator._unique_branch_suffix", lambda: "20240101120000")
+    # _safe_id("sess-1") + suffix → trial/regression/sess_1-20240101120000
+    import trial.generator as gen
+    safe = gen._safe_id("sess-1")
+    suffix = gen._unique_branch_suffix()
+    assert f"{safe}-{suffix}" == "sess_1-20240101120000"
+
+
+def test_github_api_error_includes_response_body(monkeypatch):
+    """HTTPError from GitHub API should include the response body in the message."""
+    import urllib.error
+    import urllib.request
+
+    class FakeHTTPError(urllib.error.HTTPError):
+        def __init__(self):
+            super().__init__(
+                url="https://api.github.com/repos/a/b/pulls",
+                code=422,
+                msg="Unprocessable Entity",
+                hdrs={},
+                fp=None,
+            )
+            self._body = b'{"message": "Validation Failed", "errors": [{"message": "branch already exists"}]}'
+
+        def read(self):
+            return self._body
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req: (_ for _ in ()).throw(FakeHTTPError()))
+
+    import subprocess
+    class FakeResult:
+        stdout = "https://github.com/acme/repo.git\n"
+        returncode = 0
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: FakeResult())
+
+    cfg._default_provider = FakeProvider()
+    try:
+        with pytest.raises(RuntimeError, match="422"):
+            create_regression_pr(
+                USER_MSG, RESPONSE,
+                github_token="ghp_fake",
+                session_id="sess-99",
+                repo_path=".",
+            )
+    finally:
+        cfg._default_provider = None
+
+
+def test_git_error_includes_stderr(monkeypatch):
+    """CalledProcessError from git should surface stderr in the RuntimeError message."""
+    import subprocess
+
+    def fake_run(cmd, **kwargs):
+        if "remote" in cmd:
+            class R:
+                stdout = "https://github.com/acme/repo.git\n"
+                returncode = 0
+            return R()
+        err = subprocess.CalledProcessError(128, cmd)
+        err.stderr = "fatal: A branch named 'trial/regression/x' already exists."
+        err.stdout = ""
+        raise err
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    cfg._default_provider = FakeProvider()
+
+    try:
+        with pytest.raises(RuntimeError, match="already exists"):
+            create_regression_pr(
+                USER_MSG, RESPONSE,
+                github_token="ghp_fake",
+                session_id="x",
+                repo_path=".",
+            )
+    finally:
+        cfg._default_provider = None
