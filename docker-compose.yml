@@ -1,0 +1,7 @@
+services:
+  eval:
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    command: pytest tests/ -m "not integration"
