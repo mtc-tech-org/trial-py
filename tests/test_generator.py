@@ -1,10 +1,12 @@
-"""Tests for generate_regression_test()."""
+"""Tests for generate_regression_test() and create_regression_pr()."""
 
+import json
 import os
 import pytest
 
 import trial.config as cfg
-from trial import generate_regression_test
+from trial import generate_regression_test, create_regression_pr
+from trial.generator import _get_github_repo, _safe_id
 from trial.providers.base import BaseProvider
 from trial.tools import ToolCall
 
@@ -230,3 +232,135 @@ def test_tool_calls_accepted():
         assert isinstance(code, str)
     finally:
         cfg._default_provider = None
+
+
+# --- _safe_id helper ---
+
+def test_safe_id_none():
+    assert _safe_id(None) == "session"
+
+def test_safe_id_alphanumeric():
+    assert _safe_id("abc123") == "abc123"
+
+def test_safe_id_hyphens_and_dots():
+    assert _safe_id("sess-8821.prod") == "sess_8821_prod"
+
+
+# --- _get_github_repo helper ---
+
+def test_get_github_repo_https(monkeypatch):
+    import subprocess
+
+    class FakeResult:
+        stdout = "https://github.com/acme/my-repo.git\n"
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: FakeResult())
+    owner, repo = _get_github_repo(".")
+    assert owner == "acme"
+    assert repo == "my-repo"
+
+
+def test_get_github_repo_ssh(monkeypatch):
+    import subprocess
+
+    class FakeResult:
+        stdout = "git@github.com:acme/my-repo.git\n"
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: FakeResult())
+    owner, repo = _get_github_repo(".")
+    assert owner == "acme"
+    assert repo == "my-repo"
+
+
+def test_get_github_repo_unknown_format_raises(monkeypatch):
+    import subprocess
+
+    class FakeResult:
+        stdout = "https://gitlab.com/acme/repo.git\n"
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: FakeResult())
+    with pytest.raises(ValueError, match="Could not parse"):
+        _get_github_repo(".")
+
+
+# --- create_regression_pr ---
+
+def test_create_regression_pr_missing_token():
+    """Passing an empty token still calls through — the API will reject it.
+    We just verify the function exists and accepts the right arguments."""
+    # This test confirms the signature is correct without making real calls
+    import inspect
+    sig = inspect.signature(create_regression_pr)
+    assert "github_token" in sig.parameters
+    assert "session_id" in sig.parameters
+    assert "repo_path" in sig.parameters
+    assert "base_branch" in sig.parameters
+
+
+def test_create_regression_pr_full_flow(monkeypatch, tmp_path):
+    """Full flow with all external calls monkeypatched."""
+    import subprocess
+    import urllib.request
+    import trial.generator as gen
+
+    # Fake git remote
+    class FakeRemoteResult:
+        stdout = "https://github.com/acme/my-repo.git\n"
+
+    # Track git calls
+    git_calls = []
+
+    def fake_run(cmd, **kwargs):
+        git_calls.append(cmd)
+        r = FakeRemoteResult()
+        r.returncode = 0
+        return r
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    # Fake GitHub API
+    pr_responses = []
+
+    class FakeHTTPResponse:
+        def __init__(self):
+            self._data = json.dumps({"html_url": "https://github.com/acme/my-repo/pull/42"}).encode()
+
+        def read(self):
+            return self._data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req: FakeHTTPResponse())
+
+    # Fake provider
+    cfg._default_provider = FakeProvider()
+
+    try:
+        pr_url = create_regression_pr(
+            USER_MSG,
+            RESPONSE,
+            github_token="ghp_fake",
+            session_id="sess-42",
+            repo_path=str(tmp_path),
+            tests_dir="tests",
+            base_branch="main",
+        )
+    finally:
+        cfg._default_provider = None
+
+    assert pr_url == "https://github.com/acme/my-repo/pull/42"
+
+    # Verify the test file was written
+    test_file = tmp_path / "tests" / "test_regression_sess_42.py"
+    assert test_file.exists()
+
+    # Verify git was used to create branch, add, commit, push
+    cmds = [" ".join(c) for c in git_calls]
+    assert any("checkout" in c and "trial/regression" in c for c in cmds)
+    assert any("add" in c for c in cmds)
+    assert any("commit" in c for c in cmds)
+    assert any("push" in c for c in cmds)
