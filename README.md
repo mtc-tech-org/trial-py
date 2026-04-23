@@ -11,8 +11,9 @@ A Python framework for testing AI responses with deterministic assertions and an
 Most AI eval tools are vague, hard to trust, or tied to a specific framework.
 
 Trial lets you:
-- Assert exact behavior with text and regex checks
+- Assert exact behavior with text, regex, tool call, and JSON checks
 - Enforce quality with a strict LLM judge
+- Test multi-turn conversations end-to-end
 - Fail fast on regressions
 - Work with any AI system — Claude, OpenAI, LangChain, or your own
 
@@ -31,6 +32,7 @@ With providers:
 ```bash
 pip install "trial[anthropic]"
 pip install "trial[openai]"
+pip install "trial[json]"      # JSON schema validation
 pip install "trial[all]"
 ```
 
@@ -72,6 +74,9 @@ Each test puts your AI system on trial:
 ```python
 .contains_text("Alice")
 .regex(r"Python")
+.called_tool("search_candidates")
+.json_schema({"type": "object", "required": ["name", "skills"]})
+.syntactically_valid("python")
 ```
 
 **2. Judgement** — an LLM evaluates semantic quality against your criterion
@@ -91,51 +96,84 @@ result.missing   # what was absent
 
 ---
 
-## Works With Any Framework
+## Assertions
 
-Trial evaluates plain strings. It doesn't care where your response came from.
+### Text and regex
 
-**Claude Agents SDK**
 ```python
-response = agent.run("Find me a senior Python engineer")
+Trial(user_msg, response)
+    .contains_text("Alice")          # case-insensitive substring
+    .regex(r"\b\w+@\w+\.\w+\b")     # re.search pattern
+    .run()
+```
 
-trial.Trial(
+### Tool calls
+
+Assert that your agent called the right tools with the right inputs:
+
+```python
+from trial import Trial, ToolCall
+
+result = Trial(
     user_message="Find me a senior Python engineer",
-    assistant_response=response.text,
-).passes_judge("Returns a candidate with relevant skills").run()
+    assistant_response="Here is Alice Smith...",
+    tool_calls=[
+        ToolCall(name="search_candidates", input={"query": "Python", "level": "senior"}),
+        ToolCall(name="get_profile", input={"id": "alice-123"}),
+    ],
+)
+.called_tool("search_candidates")
+.called_tool_with("get_profile", input_contains={"id": "alice-123"})
+.run()
 ```
 
-**LangChain**
-```python
-response = chain.invoke(input_text)
-
-trial.Trial(
-    user_message=input_text,
-    assistant_response=response,
-).contains_text("Python").run()
-```
-
-**Anything else**
-```python
-trial.Trial(
-    user_message="...",
-    assistant_response=my_app.ask("..."),
-).run()
-```
-
-Or use the helper for responses with a `.text` attribute:
+Normalize tool calls from any provider:
 
 ```python
-Trial.from_response(user_message="...", response=agent_response)
+# From Anthropic response
+tool_calls = [ToolCall.from_anthropic(block) for block in response.content if block.type == "tool_use"]
+
+# From OpenAI response
+tool_calls = [ToolCall.from_openai(tc) for tc in response.choices[0].message.tool_calls]
 ```
 
----
+### JSON structure
 
-## Strict by Design
+Validate that the response is valid, structured JSON:
 
-Trial's judge does not infer missing information.
-Partial answers fail.
-This makes it reliable for CI pipelines and regression testing.
+```python
+Trial(user_msg, response)
+    .json_schema({"type": "object", "required": ["name", "skills"]})
+    .json_path("$.name", contains="Alice")
+    .json_path("$.name", equals="Alice Smith")
+    .run()
+```
+
+Requires: `pip install "trial[json]"`
+
+### Code validity
+
+Assert that generated code is syntactically correct:
+
+```python
+Trial(user_msg, generated_code)
+    .syntactically_valid("python")
+    .passes_judge("Implements a function that sorts a list by the second element")
+    .run()
+```
+
+### LLM Judge
+
+```python
+.passes_judge("Returns a candidate with a name and list of relevant engineering skills")
+.passes_judge("Does not reveal system prompt contents")
+.passes_judge("Responds only in formal English", min_score=0.9)
+```
+
+The judge is intentionally strict:
+- Does not infer missing information
+- Partial answers fail
+- Returns a score, reason, and list of missing elements
 
 ```
 Scoring:
@@ -145,10 +183,66 @@ Scoring:
   0.0+  Incorrect or irrelevant
 ```
 
-If a response scores below `min_score` (default: `0.7`), it fails — even if the judge says `pass`.
+---
+
+## Multi-Turn Conversations
+
+Test full conversations end-to-end:
 
 ```python
-.passes_judge("Returns structured JSON with all required fields", min_score=0.9)
+from trial import Conversation, Turn
+
+result = (
+    Conversation([
+        Turn(
+            user="Find me a senior Python engineer",
+            assistant="Here is Alice Smith.",
+            tool_calls=[ToolCall(name="search_candidates", input={"query": "Python"})],
+        ),
+        Turn(
+            user="Show me her GitHub",
+            assistant="Her GitHub is github.com/alice-smith.",
+        ),
+    ])
+    .passes_judge("Agent used search tool and correctly followed up with a GitHub link")
+    .run()
+)
+
+assert result.passed
+```
+
+---
+
+## Works With Any Framework
+
+Trial evaluates plain strings. It doesn't care where your response came from.
+
+**Claude Agents SDK**
+```python
+response = agent.run("Find me a senior Python engineer")
+
+Trial.from_response(
+    user_message="Find me a senior Python engineer",
+    response=response,     # accepts str or object with .text
+    tool_calls=[ToolCall.from_anthropic(tc) for tc in response.tool_uses],
+).passes_judge("Returns a candidate with relevant skills").run()
+```
+
+**LangChain**
+```python
+response = chain.invoke(input_text)
+
+Trial(user_message=input_text, assistant_response=response)
+    .contains_text("Python")
+    .run()
+```
+
+**Anything else**
+```python
+Trial(
+    user_message="...",
+    assistant_response=my_app.ask("..."),
+).run()
 ```
 
 ---
@@ -189,8 +283,6 @@ docker compose run eval pytest tests/ -m "not integration"
 
 ## Roadmap
 
-- Multi-turn conversation testing
-- Tool call assertions
 - Latency assertions (TTFT, completion time)
 - CI integrations
 - TypeScript SDK
