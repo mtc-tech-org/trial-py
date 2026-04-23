@@ -74,7 +74,10 @@ Every test has three layers:
 ```python
 .contains_text("spaghetti")
 .regex(r"Serves \d+")
+.no_errors()
 .called_tool("search_recipe")
+.completes_within(5.0)
+.first_token_within(1.0)
 .json_schema({"type": "object", "required": ["title", "ingredients"]})
 .syntactically_valid("python")
 ```
@@ -101,9 +104,61 @@ result.missing   # what was absent
 
 ---
 
+## Integration model
+
+Trial does not run your agent.
+
+You run your agent however you want — Slack bots, gRPC services, streaming pipelines, custom orchestration. Then pass the result to Trial for evaluation.
+
+```python
+response = await chat_client.send("Give me a pasta recipe")
+
+result = (
+    Trial.from_execution(
+        user_message="Give me a pasta recipe",
+        response=response.full_text,
+        metrics={
+            "elapsed_time": response.elapsed_time,
+            "first_token_time": response.first_token_time,
+        },
+        tool_calls=response.tool_invocations,
+        error=response.error,
+    )
+    .no_errors()
+    .completes_within(5.0)
+    .passes_judge("Returns a complete recipe with ingredients and steps")
+    .run()
+)
+```
+
+Trial is the evaluation layer — not the execution layer.
+
+---
+
 ## Works with any AI system
 
-Trial evaluates plain inputs and outputs.
+**`from_execution` — for external systems** (primary integration point)
+
+```python
+Trial.from_execution(
+    user_message="...",
+    response=response.full_text,
+    metrics={"elapsed_time": 2.1, "first_token_time": 0.4},
+    tool_calls=response.tool_invocations,  # list[ToolCall]
+    error=response.error,
+)
+```
+
+**`from_response` — for SDK response objects**
+
+```python
+response = anthropic_client.messages.create(...)
+
+Trial.from_response(
+    user_message="Give me a pasta recipe",
+    response=response,   # tool calls extracted automatically
+).passes_judge("Returns a recipe with ingredients").run()
+```
 
 **Auto-call your agent**
 
@@ -123,17 +178,6 @@ configure(
     provider=AnthropicProvider(model="claude-sonnet-4-6"),
     agent="http://localhost:8000/chat",   # POST {message: ...}, expects {response: ...}
 )
-```
-
-**Manual response**
-
-```python
-response = agent.run("Give me a pasta recipe")
-
-Trial.from_response(
-    user_message="Give me a pasta recipe",
-    response=response,
-).passes_judge("Returns a recipe with ingredients").run()
 ```
 
 ---
@@ -308,9 +352,9 @@ ANTHROPIC_API_KEY=... pytest -m integration
 
 ## Roadmap
 
-- Latency assertions (TTFT, completion time)
 - CI integration
 - TypeScript SDK
+- Dataset-level eval runner
 
 ---
 

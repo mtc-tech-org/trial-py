@@ -70,6 +70,7 @@ class Trial:
         provider: BaseProvider | None = None,
         tool_calls: list[ToolCall] | None = None,
         metrics: dict[str, float] | None = None,
+        error: str | Exception | None = None,
     ) -> None:
         self._user_message = user_message
         self._assistant_response = assistant_response
@@ -77,6 +78,7 @@ class Trial:
         self._tool_calls = tool_calls or []
         self._metrics: dict[str, float] = metrics or {}
         self._auto_metrics: dict[str, float] = {}
+        self._error: str | None = str(error) if error is not None else None
         self._text_checks: list[str] = []
         self._regex_checks: list[str] = []
         self._tool_checks: list[tuple[str, dict | None]] = []
@@ -84,6 +86,7 @@ class Trial:
         self._json_path_checks: list[tuple[str, str | None, Any]] = []
         self._syntax_checks: list[str] = []
         self._metric_checks: list[tuple[str, str, float]] = []
+        self._no_errors_check: bool = False
         self._after_checks: list[tuple[str, Callable[[], bool]]] = []
         self._judge_checks: list[tuple[str, float]] = []
 
@@ -105,6 +108,35 @@ class Trial:
             provider=provider,
             tool_calls=tool_calls,
             metrics=metrics,
+        )
+
+    @classmethod
+    def from_execution(
+        cls,
+        user_message: str,
+        response: str | Any,
+        *,
+        metrics: dict[str, float] | None = None,
+        tool_calls: list[ToolCall] | None = None,
+        error: str | Exception | None = None,
+        provider: BaseProvider | None = None,
+    ) -> Trial:
+        """Primary integration point for external execution systems.
+
+        Use this when your agent runs outside Trial (e.g. Slack bots, gRPC
+        services, streaming pipelines). Pass in the pre-collected response,
+        metrics, tool calls, and any error that occurred.
+
+        Tool calls are taken as-is — no auto-extraction is performed.
+        """
+        text = normalize_response(response)
+        return cls(
+            user_message=user_message,
+            assistant_response=text,
+            provider=provider,
+            tool_calls=tool_calls or [],
+            metrics=metrics,
+            error=error,
         )
 
     def contains_text(self, text: str) -> Trial:
@@ -151,6 +183,15 @@ class Trial:
 
     def first_token_within(self, seconds: float) -> Trial:
         self._metric_checks.append(("first_token_time", "first_token_within", seconds))
+        return self
+
+    def no_errors(self) -> Trial:
+        """Assert that no error occurred during execution.
+
+        Works with the error= parameter on Trial() or Trial.from_execution().
+        Fails with a clear message if an error string was provided.
+        """
+        self._no_errors_check = True
         return self
 
     def after(self, check: Callable[[], bool], label: str = "post-run check") -> Trial:
@@ -206,6 +247,9 @@ class Trial:
             response = self._resolve_response()
 
         failures: list[str] = []
+
+        if self._no_errors_check and self._error is not None:
+            failures.append(f"Expected no errors, but received: {self._error}")
 
         for text in self._text_checks:
             if text.lower() not in response.lower():
