@@ -44,13 +44,15 @@ pip install "trial[all]"
 import trial
 from trial.providers import AnthropicProvider
 
-trial.configure(provider=AnthropicProvider(model="claude-sonnet-4-6"))
+# Configure once — provider for the judge, agent under test
+trial.configure(
+    provider=AnthropicProvider(model="claude-sonnet-4-6"),
+    agent=my_agent.run,
+)
 
+# Trial calls your agent automatically, then evaluates the response
 result = (
-    trial.Trial(
-        user_message="Give me a quick pasta recipe for two people",
-        assistant_response="Here's spaghetti aglio e olio: 200g spaghetti, 4 garlic cloves, olive oil, chili flakes, parsley. Serves 2.",
-    )
+    trial.Trial(user_message="Give me a quick pasta recipe for two people")
     .contains_text("spaghetti")
     .regex(r"Serves \d+")
     .passes_judge("Returns a pasta recipe with a name and list of ingredients")
@@ -109,32 +111,31 @@ Trial(user_msg, response)
 
 ### Tool calls
 
-Assert that your agent called the right tools with the right inputs:
+Assert that your agent called the right tools with the right inputs.
+
+Normalize tool calls directly from the provider response:
 
 ```python
-from trial import Trial, ToolCall
+# From Anthropic
+response = anthropic_agent.run("Give me a pasta recipe for two")
+tool_calls = [ToolCall.from_anthropic(block) for block in response.content if block.type == "tool_use"]
 
-result = Trial(
+# From OpenAI
+response = openai_agent.run("Give me a pasta recipe for two")
+tool_calls = [ToolCall.from_openai(tc) for tc in response.choices[0].message.tool_calls]
+```
+
+Then assert on them:
+
+```python
+Trial(
     user_message="Give me a pasta recipe for two",
-    assistant_response="Here's spaghetti aglio e olio...",
-    tool_calls=[
-        ToolCall(name="search_recipe", input={"query": "pasta", "servings": 2}),
-        ToolCall(name="get_nutrition", input={"dish": "spaghetti-aglio"}),
-    ],
+    assistant_response=response.text,
+    tool_calls=tool_calls,
 )
 .called_tool("search_recipe")
 .called_tool_with("get_nutrition", input_contains={"dish": "spaghetti-aglio"})
 .run()
-```
-
-Normalize tool calls from any provider:
-
-```python
-# From Anthropic response
-tool_calls = [ToolCall.from_anthropic(block) for block in response.content if block.type == "tool_use"]
-
-# From OpenAI response
-tool_calls = [ToolCall.from_openai(tc) for tc in response.choices[0].message.tool_calls]
 ```
 
 ### JSON structure
@@ -187,23 +188,22 @@ Scoring:
 
 ## Multi-Turn Conversations
 
-Test full conversations end-to-end:
+Test full conversations end-to-end by recording turns as they happen:
 
 ```python
-from trial import Conversation, Turn
+from trial import Conversation, Turn, ToolCall
+
+turns = []
+for user_msg in ["Give me a pasta recipe", "How many calories does it have?"]:
+    response = my_agent.run(user_msg)
+    turns.append(Turn(
+        user=user_msg,
+        assistant=response.text,
+        tool_calls=[ToolCall.from_anthropic(tc) for tc in response.tool_uses],
+    ))
 
 result = (
-    Conversation([
-        Turn(
-            user="Give me a pasta recipe",
-            assistant="Here's spaghetti aglio e olio.",
-            tool_calls=[ToolCall(name="search_recipe", input={"query": "pasta"})],
-        ),
-        Turn(
-            user="How many calories does it have?",
-            assistant="Around 400 calories per serving.",
-        ),
-    ])
+    Conversation(turns)
     .passes_judge("Agent used search tool and correctly provided a calorie estimate when asked")
     .run()
 )
@@ -217,32 +217,39 @@ assert result.passed
 
 Trial evaluates plain strings. It doesn't care where your response came from.
 
-**Claude Agents SDK**
+**Recommended: configure the agent globally**
+
+```python
+trial.configure(
+    provider=AnthropicProvider(model="claude-sonnet-4-6"),
+    agent=my_agent.run,   # any callable that takes a string and returns a string
+)
+
+# Now every Trial() calls the agent automatically
+Trial(user_message="Give me a pasta recipe").passes_judge("Returns a recipe").run()
+```
+
+**Or pass an HTTP endpoint**
+
+```python
+trial.configure(
+    provider=AnthropicProvider(model="claude-sonnet-4-6"),
+    agent="http://localhost:8000/chat",   # POST {message: ...}, expects {response: ...}
+)
+```
+
+**Or provide the response manually**
+
+Useful when your agent returns structured data alongside the text:
+
 ```python
 response = agent.run("Give me a pasta recipe")
 
 Trial.from_response(
     user_message="Give me a pasta recipe",
-    response=response,     # accepts str or object with .text
+    response=response,     # str or object with .text
     tool_calls=[ToolCall.from_anthropic(tc) for tc in response.tool_uses],
 ).passes_judge("Returns a recipe with ingredients").run()
-```
-
-**LangChain**
-```python
-response = chain.invoke(input_text)
-
-Trial(user_message=input_text, assistant_response=response)
-    .contains_text("ingredients")
-    .run()
-```
-
-**Anything else**
-```python
-Trial(
-    user_message="...",
-    assistant_response=my_app.ask("..."),
-).run()
 ```
 
 ---
