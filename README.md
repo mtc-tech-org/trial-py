@@ -228,18 +228,105 @@ Trial(user_msg, code)
 
 ---
 
+## Latency assertions
+
+```python
+Trial.from_execution(user_msg, response, metrics={"elapsed_time": 2.1, "first_token_time": 0.4})
+    .completes_within(5.0)
+    .first_token_within(1.0)
+    .run()
+```
+
+Pass metrics manually (e.g. from a streaming system), or let trial time it automatically when using `configure(agent=...)`.
+
+---
+
+## Post-run hooks
+
+Assert side effects after the agent responds:
+
+```python
+Trial.from_execution(user_msg, response)
+    .after(lambda: db.row_exists("order_123"), label="order created in DB")
+    .after(lambda: cache.has("result"), label="result cached")
+    .run()
+```
+
+Hooks run after all other checks. Each hook is independent — all run even if one fails. Exceptions are caught and reported as failures.
+
+---
+
 ## Multi-turn conversations
 
 ```python
 from trial import Conversation, Turn
 
-Conversation([
-    Turn(user="Give me a recipe", assistant="..."),
-    Turn(user="How many calories?", assistant="..."),
-])
+Conversation(
+    turns=[
+        Turn(user="Give me a recipe", assistant="..."),
+        Turn(user="How many calories?", assistant="..."),
+    ],
+    session_id="sess-abc",
+    metadata={"user_tier": "pro"},
+)
 .passes_judge("Agent follows up correctly and answers both questions")
 .run()
 ```
+
+`session_id` and `metadata` are included in the judge context.
+
+---
+
+## Regression test generator
+
+When your agent misbehaves in production, trial can analyze the failure and generate a regression test automatically.
+
+**Generate a test file:**
+
+```python
+from trial import generate_regression_test
+
+code = generate_regression_test(
+    user_message="Book me a flight to Amsterdam",
+    response="I can help with that!",  # said it would help, then did nothing
+    session_id="sess-8821",
+    error=None,
+    metrics={"elapsed_time": 24.3},
+    output_path="tests/test_regression_sess_8821.py",
+)
+```
+
+Trial uses an LLM to analyze what went wrong and writes a pytest file with appropriate assertions. The only thing left to do is replace the placeholder agent call:
+
+```python
+def test_regression_sess_8821():
+    response = your_agent(USER_MSG)  # TODO: replace with your agent
+    ...
+```
+
+**Or open a GitHub PR automatically:**
+
+```python
+from trial import create_regression_pr
+
+pr_url = create_regression_pr(
+    user_message="Book me a flight to Amsterdam",
+    response="I can help with that!",
+    session_id="sess-8821",
+    error=None,
+    metrics={"elapsed_time": 24.3},
+    github_token=os.environ["GITHUB_TOKEN"],
+    # optional:
+    repo_path=".",          # defaults to current directory
+    tests_dir="tests",      # where to write the file
+    base_branch="main",     # PR target branch
+)
+# → https://github.com/your-org/your-repo/pull/42
+```
+
+This creates a branch `trial/regression/sess-8821-<timestamp>`, commits the test file, pushes, and opens a PR. Requires a GitHub token with `repo` scope.
+
+The generated PR includes instructions for the reviewer. Once they fill in the agent call and the PR merges, CI will catch the regression forever.
 
 ---
 
