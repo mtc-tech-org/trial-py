@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
-    {name = "MTC Tech", email = "hello@mtc.tech"},
+    {name = "MTC Tech", email = "info@mtctech.io"},
 ]
 keywords = ["ai", "llm", "testing", "evaluation", "agents"]
 classifiers = [
