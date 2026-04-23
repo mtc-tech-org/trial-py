@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from . import judge as _judge
-from .config import get_provider
+from .config import get_agent, get_provider
 from .providers.base import BaseProvider
 from .result import TrialResult
 from .tools import ToolCall
@@ -24,7 +24,7 @@ class Trial:
     def __init__(
         self,
         user_message: str,
-        assistant_response: str,
+        assistant_response: str | None = None,
         provider: BaseProvider | None = None,
         tool_calls: list[ToolCall] | None = None,
     ) -> None:
@@ -103,15 +103,55 @@ class Trial:
         self._judge_checks.append((criterion, min_score))
         return self
 
+    def _resolve_response(self) -> str:
+        agent = get_agent()
+        if agent is None:
+            raise RuntimeError(
+                "No assistant_response provided and no agent configured. "
+                "Pass assistant_response= or call trial.configure(agent=...)."
+            )
+        if isinstance(agent, str):
+            return self._call_endpoint(agent)
+        result = agent(self._user_message)
+        if isinstance(result, str):
+            return result
+        if hasattr(result, "text"):
+            return result.text
+        return str(result)
+
+    def _call_endpoint(self, url: str) -> str:
+        import json
+        import urllib.request
+
+        data = json.dumps({"message": self._user_message}).encode()
+        req = urllib.request.Request(
+            url, data=data, headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req) as resp:
+            body = json.loads(resp.read())
+        if isinstance(body, str):
+            return body
+        for key in ("response", "text", "content", "message"):
+            if key in body:
+                return body[key]
+        raise ValueError(
+            f"Could not extract response text from endpoint payload. "
+            f"Expected a key 'response', 'text', 'content', or 'message'. Got: {list(body.keys())}"
+        )
+
     def run(self) -> TrialResult:
+        response = self._assistant_response
+        if response is None:
+            response = self._resolve_response()
+
         failures: list[str] = []
 
         for text in self._text_checks:
-            if text.lower() not in self._assistant_response.lower():
+            if text.lower() not in response.lower():
                 failures.append(f"Expected response to contain text: {text!r}")
 
         for pattern in self._regex_checks:
-            if not re.search(pattern, self._assistant_response):
+            if not re.search(pattern, response):
                 failures.append(f"Expected response to match regex: {pattern!r}")
 
         for name, input_contains in self._tool_checks:
@@ -136,7 +176,7 @@ class Trial:
                     "jsonschema is not installed. Install it with: pip install 'trial[json]'"
                 )
             try:
-                data = json.loads(self._assistant_response)
+                data = json.loads(response)
                 jsonschema.validate(data, schema)
             except json.JSONDecodeError as e:
                 failures.append(f"Response is not valid JSON: {e}")
@@ -145,7 +185,7 @@ class Trial:
 
         for path, contains, equals in self._json_path_checks:
             try:
-                data = json.loads(self._assistant_response)
+                data = json.loads(response)
                 value = _resolve_json_path(data, path)
                 if contains is not None and contains not in str(value):
                     failures.append(
@@ -162,7 +202,7 @@ class Trial:
 
         for language in self._syntax_checks:
             try:
-                ast.parse(self._assistant_response)
+                ast.parse(response)
             except SyntaxError as e:
                 failures.append(f"Python syntax error: {e}")
 
@@ -183,7 +223,7 @@ class Trial:
             verdict = _judge.evaluate(
                 criterion=criterion,
                 user_message=self._user_message,
-                assistant_response=self._assistant_response,
+                assistant_response=response,
                 provider=provider,
                 min_score=min_score,
             )
