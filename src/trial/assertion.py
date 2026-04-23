@@ -3,7 +3,8 @@ from __future__ import annotations
 import ast
 import json
 import re
-from typing import Any
+import time
+from typing import Any, Callable
 
 from . import judge as _judge
 from .config import get_agent, get_provider
@@ -68,17 +69,22 @@ class Trial:
         assistant_response: str | None = None,
         provider: BaseProvider | None = None,
         tool_calls: list[ToolCall] | None = None,
+        metrics: dict[str, float] | None = None,
     ) -> None:
         self._user_message = user_message
         self._assistant_response = assistant_response
         self._provider = provider
         self._tool_calls = tool_calls or []
+        self._metrics: dict[str, float] = metrics or {}
+        self._auto_metrics: dict[str, float] = {}
         self._text_checks: list[str] = []
         self._regex_checks: list[str] = []
         self._tool_checks: list[tuple[str, dict | None]] = []
         self._json_schema_checks: list[dict] = []
         self._json_path_checks: list[tuple[str, str | None, Any]] = []
         self._syntax_checks: list[str] = []
+        self._metric_checks: list[tuple[str, str, float]] = []
+        self._after_checks: list[tuple[str, Callable[[], bool]]] = []
         self._judge_checks: list[tuple[str, float]] = []
 
     @classmethod
@@ -88,6 +94,7 @@ class Trial:
         response: str | Any,
         provider: BaseProvider | None = None,
         tool_calls: list[ToolCall] | None = None,
+        metrics: dict[str, float] | None = None,
     ) -> Trial:
         text = normalize_response(response)
         if tool_calls is None:
@@ -97,6 +104,7 @@ class Trial:
             assistant_response=text,
             provider=provider,
             tool_calls=tool_calls,
+            metrics=metrics,
         )
 
     def contains_text(self, text: str) -> Trial:
@@ -137,9 +145,25 @@ class Trial:
         self._syntax_checks.append(language)
         return self
 
+    def completes_within(self, seconds: float) -> Trial:
+        self._metric_checks.append(("elapsed_time", "completes_within", seconds))
+        return self
+
+    def first_token_within(self, seconds: float) -> Trial:
+        self._metric_checks.append(("first_token_time", "first_token_within", seconds))
+        return self
+
+    def after(self, check: Callable[[], bool], label: str = "post-run check") -> Trial:
+        self._after_checks.append((label, check))
+        return self
+
     def passes_judge(self, criterion: str, min_score: float = 0.7) -> Trial:
         self._judge_checks.append((criterion, min_score))
         return self
+
+    def _effective_metrics(self) -> dict[str, float]:
+        # User-provided metrics take precedence over auto-collected
+        return {**self._auto_metrics, **self._metrics}
 
     def _resolve_response(self) -> str:
         agent = get_agent()
@@ -150,18 +174,22 @@ class Trial:
             )
         if isinstance(agent, str):
             return self._call_endpoint(agent)
-        return normalize_response(agent(self._user_message))
+        start = time.monotonic()
+        raw = agent(self._user_message)
+        self._auto_metrics["elapsed_time"] = time.monotonic() - start
+        return normalize_response(raw)
 
     def _call_endpoint(self, url: str) -> str:
-        import json
         import urllib.request
 
         data = json.dumps({"message": self._user_message}).encode()
         req = urllib.request.Request(
             url, data=data, headers={"Content-Type": "application/json"}
         )
+        start = time.monotonic()
         with urllib.request.urlopen(req) as resp:
             body = json.loads(resp.read())
+        self._auto_metrics["elapsed_time"] = time.monotonic() - start
         if isinstance(body, str):
             return body
         for key in ("response", "text", "content", "message"):
@@ -239,36 +267,59 @@ class Trial:
             except SyntaxError as e:
                 failures.append(f"Python syntax error: {e}")
 
+        metrics = self._effective_metrics()
+        for metric_key, label, threshold in self._metric_checks:
+            value = metrics.get(metric_key)
+            if value is None:
+                failures.append(
+                    f"{label}({threshold}s): metric '{metric_key}' not available — "
+                    f"pass metrics= or use configure(agent=...) for auto-timing"
+                )
+            elif value > threshold:
+                failures.append(f"{label}: {value:.2f}s exceeded limit of {threshold:.2f}s")
+
         if not self._judge_checks:
             passed = len(failures) == 0
-            return TrialResult(
+            result = TrialResult(
                 passed=passed,
                 score=1.0 if passed else 0.0,
                 reason="All deterministic checks passed." if passed else f"{len(failures)} check(s) failed.",
                 missing=[],
                 assertion_failures=failures,
             )
+        else:
+            provider = self._provider or get_provider()
+            last_verdict = None
 
-        provider = self._provider or get_provider()
-        last_verdict = None
+            for criterion, min_score in self._judge_checks:
+                verdict = _judge.evaluate(
+                    criterion=criterion,
+                    user_message=self._user_message,
+                    assistant_response=response,
+                    provider=provider,
+                    min_score=min_score,
+                )
+                if not verdict.passed:
+                    failures.append(f"Judge failed: {verdict.reason}")
+                last_verdict = verdict
 
-        for criterion, min_score in self._judge_checks:
-            verdict = _judge.evaluate(
-                criterion=criterion,
-                user_message=self._user_message,
-                assistant_response=response,
-                provider=provider,
-                min_score=min_score,
+            passed = len(failures) == 0
+            result = TrialResult(
+                passed=passed,
+                score=last_verdict.score,
+                reason=last_verdict.reason,
+                missing=last_verdict.missing,
+                assertion_failures=failures,
             )
-            if not verdict.passed:
-                failures.append(f"Judge failed: {verdict.reason}")
-            last_verdict = verdict
 
-        passed = len(failures) == 0
-        return TrialResult(
-            passed=passed,
-            score=last_verdict.score,
-            reason=last_verdict.reason,
-            missing=last_verdict.missing,
-            assertion_failures=failures,
-        )
+        for label, check in self._after_checks:
+            try:
+                ok = check()
+                if not ok:
+                    result.passed = False
+                    result.assertion_failures.append(f"Post-run check failed: {label!r}")
+            except Exception as e:
+                result.passed = False
+                result.assertion_failures.append(f"Post-run check raised: {label!r} — {e}")
+
+        return result

@@ -17,9 +17,17 @@ class Turn:
 
 
 class Conversation:
-    def __init__(self, turns: list[Turn], provider: BaseProvider | None = None) -> None:
+    def __init__(
+        self,
+        turns: list[Turn],
+        provider: BaseProvider | None = None,
+        session_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
         self._turns = turns
         self._provider = provider
+        self.session_id = session_id
+        self.metadata = metadata or {}
         self._judge_checks: list[tuple[str, float]] = []
 
     def passes_judge(self, criterion: str, min_score: float = 0.7) -> Conversation:
@@ -64,6 +72,12 @@ class Conversation:
 
     def _format(self) -> str:
         lines: list[str] = []
+        if self.session_id:
+            lines.append(f"Session ID: {self.session_id}")
+        if self.metadata:
+            lines.append(f"Context: {self.metadata}")
+        if lines:
+            lines.append("")
         for i, turn in enumerate(self._turns, 1):
             lines.append(f"Turn {i}:")
             lines.append(f"  User: {turn.user}")
