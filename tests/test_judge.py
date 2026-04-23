@@ -16,8 +16,8 @@ class FakeProvider(BaseProvider):
         return self._response
 
 
-USER_MSG = "Find me a senior Python engineer"
-GOOD_RESPONSE = "Here is Alice Smith, skills: Python, FastAPI, Docker"
+USER_MSG = "Give me a quick pasta recipe for two people"
+GOOD_RESPONSE = "Here's spaghetti aglio e olio: 200g spaghetti, 4 garlic cloves, olive oil, chili flakes, parsley. Serves 2."
 
 
 # --- Deterministic tests (no real LLM) ---
@@ -89,7 +89,7 @@ def test_anthropic_happy_path():
             user_message=USER_MSG,
             assistant_response=GOOD_RESPONSE,
         )
-        .passes_judge("Returns a candidate with a name and list of relevant engineering skills")
+        .passes_judge("Returns a pasta recipe with a name and list of ingredients")
         .run()
     )
 
@@ -112,7 +112,7 @@ def test_anthropic_strict_fail():
             user_message=USER_MSG,
             assistant_response="I cannot help with that.",
         )
-        .passes_judge("Returns a candidate with a name and list of relevant engineering skills")
+        .passes_judge("Returns a pasta recipe with a name and list of ingredients")
         .run()
     )
 

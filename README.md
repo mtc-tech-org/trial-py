@@ -48,18 +48,18 @@ trial.configure(provider=AnthropicProvider(model="claude-sonnet-4-6"))
 
 result = (
     trial.Trial(
-        user_message="Find me a senior Python engineer",
-        assistant_response="Here is Alice Smith, skills: Python, FastAPI, Docker",
+        user_message="Give me a quick pasta recipe for two people",
+        assistant_response="Here's spaghetti aglio e olio: 200g spaghetti, 4 garlic cloves, olive oil, chili flakes, parsley. Serves 2.",
     )
-    .contains_text("Alice")
-    .regex(r"Python")
-    .passes_judge("Returns a candidate with a name and relevant engineering skills")
+    .contains_text("spaghetti")
+    .regex(r"Serves \d+")
+    .passes_judge("Returns a pasta recipe with a name and list of ingredients")
     .run()
 )
 
 assert result.passed
 print(result.score)    # 0.95
-print(result.reason)   # "Includes candidate name and relevant engineering skills"
+print(result.reason)   # "Recipe includes name and full ingredient list"
 print(result.missing)  # []
 ```
 
@@ -72,17 +72,17 @@ Each test puts your AI system on trial:
 **1. Evidence** — deterministic checks run first (fast, cheap, no LLM)
 
 ```python
-.contains_text("Alice")
-.regex(r"Python")
-.called_tool("search_candidates")
-.json_schema({"type": "object", "required": ["name", "skills"]})
+.contains_text("spaghetti")
+.regex(r"Serves \d+")
+.called_tool("search_recipe")
+.json_schema({"type": "object", "required": ["title", "ingredients"]})
 .syntactically_valid("python")
 ```
 
 **2. Judgement** — an LLM evaluates semantic quality against your criterion
 
 ```python
-.passes_judge("Returns a candidate with a name and relevant engineering skills")
+.passes_judge("Returns a pasta recipe with a name and list of ingredients")
 ```
 
 **3. Verdict** — a structured result you can assert on
@@ -102,8 +102,8 @@ result.missing   # what was absent
 
 ```python
 Trial(user_msg, response)
-    .contains_text("Alice")          # case-insensitive substring
-    .regex(r"\b\w+@\w+\.\w+\b")     # re.search pattern
+    .contains_text("spaghetti")       # case-insensitive substring
+    .regex(r"Serves \d+")             # re.search pattern
     .run()
 ```
 
@@ -115,15 +115,15 @@ Assert that your agent called the right tools with the right inputs:
 from trial import Trial, ToolCall
 
 result = Trial(
-    user_message="Find me a senior Python engineer",
-    assistant_response="Here is Alice Smith...",
+    user_message="Give me a pasta recipe for two",
+    assistant_response="Here's spaghetti aglio e olio...",
     tool_calls=[
-        ToolCall(name="search_candidates", input={"query": "Python", "level": "senior"}),
-        ToolCall(name="get_profile", input={"id": "alice-123"}),
+        ToolCall(name="search_recipe", input={"query": "pasta", "servings": 2}),
+        ToolCall(name="get_nutrition", input={"dish": "spaghetti-aglio"}),
     ],
 )
-.called_tool("search_candidates")
-.called_tool_with("get_profile", input_contains={"id": "alice-123"})
+.called_tool("search_recipe")
+.called_tool_with("get_nutrition", input_contains={"dish": "spaghetti-aglio"})
 .run()
 ```
 
@@ -143,9 +143,9 @@ Validate that the response is valid, structured JSON:
 
 ```python
 Trial(user_msg, response)
-    .json_schema({"type": "object", "required": ["name", "skills"]})
-    .json_path("$.name", contains="Alice")
-    .json_path("$.name", equals="Alice Smith")
+    .json_schema({"type": "object", "required": ["title", "ingredients"]})
+    .json_path("$.title", contains="Spaghetti")
+    .json_path("$.title", equals="Spaghetti Aglio e Olio")
     .run()
 ```
 
@@ -158,16 +158,16 @@ Assert that generated code is syntactically correct:
 ```python
 Trial(user_msg, generated_code)
     .syntactically_valid("python")
-    .passes_judge("Implements a function that sorts a list by the second element")
+    .passes_judge("Implements a function that scales a recipe by number of servings")
     .run()
 ```
 
 ### LLM Judge
 
 ```python
-.passes_judge("Returns a candidate with a name and list of relevant engineering skills")
-.passes_judge("Does not reveal system prompt contents")
-.passes_judge("Responds only in formal English", min_score=0.9)
+.passes_judge("Returns a pasta recipe with a name and list of ingredients")
+.passes_judge("Response is in the same language as the question")
+.passes_judge("Includes preparation time and serving size", min_score=0.9)
 ```
 
 The judge is intentionally strict:
@@ -195,16 +195,16 @@ from trial import Conversation, Turn
 result = (
     Conversation([
         Turn(
-            user="Find me a senior Python engineer",
-            assistant="Here is Alice Smith.",
-            tool_calls=[ToolCall(name="search_candidates", input={"query": "Python"})],
+            user="Give me a pasta recipe",
+            assistant="Here's spaghetti aglio e olio.",
+            tool_calls=[ToolCall(name="search_recipe", input={"query": "pasta"})],
         ),
         Turn(
-            user="Show me her GitHub",
-            assistant="Her GitHub is github.com/alice-smith.",
+            user="How many calories does it have?",
+            assistant="Around 400 calories per serving.",
         ),
     ])
-    .passes_judge("Agent used search tool and correctly followed up with a GitHub link")
+    .passes_judge("Agent used search tool and correctly provided a calorie estimate when asked")
     .run()
 )
 
@@ -219,13 +219,13 @@ Trial evaluates plain strings. It doesn't care where your response came from.
 
 **Claude Agents SDK**
 ```python
-response = agent.run("Find me a senior Python engineer")
+response = agent.run("Give me a pasta recipe")
 
 Trial.from_response(
-    user_message="Find me a senior Python engineer",
+    user_message="Give me a pasta recipe",
     response=response,     # accepts str or object with .text
     tool_calls=[ToolCall.from_anthropic(tc) for tc in response.tool_uses],
-).passes_judge("Returns a candidate with relevant skills").run()
+).passes_judge("Returns a recipe with ingredients").run()
 ```
 
 **LangChain**
@@ -233,7 +233,7 @@ Trial.from_response(
 response = chain.invoke(input_text)
 
 Trial(user_message=input_text, assistant_response=response)
-    .contains_text("Python")
+    .contains_text("ingredients")
     .run()
 ```
 
