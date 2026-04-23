@@ -20,6 +20,47 @@ def _resolve_json_path(data: Any, path: str) -> Any:
     return current
 
 
+def normalize_response(response: Any) -> str:
+    """Extract a plain string from any agent response object."""
+    if isinstance(response, str):
+        return response
+    if hasattr(response, "text") and isinstance(response.text, str):
+        return response.text
+    if isinstance(response, dict):
+        for key in ("response", "text", "content", "message", "output"):
+            if key in response and isinstance(response[key], str):
+                return response[key]
+        raise ValueError(
+            f"Could not extract response text from dict. "
+            f"Expected a key 'response', 'text', 'content', 'message', or 'output'. "
+            f"Got: {list(response.keys())}"
+        )
+    return str(response)
+
+
+def _extract_tool_calls(response: Any) -> list:
+    """Auto-detect and extract tool calls from Anthropic or OpenAI response objects."""
+    # Anthropic: response.content is a list of blocks with .type == "tool_use"
+    if hasattr(response, "content") and isinstance(response.content, list):
+        try:
+            tools = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
+            if tools:
+                return [ToolCall.from_anthropic(b) for b in tools]
+        except Exception:
+            pass
+
+    # OpenAI: response.choices[0].message.tool_calls
+    if hasattr(response, "choices") and response.choices:
+        try:
+            tcs = response.choices[0].message.tool_calls
+            if tcs:
+                return [ToolCall.from_openai(tc) for tc in tcs]
+        except Exception:
+            pass
+
+    return []
+
+
 class Trial:
     def __init__(
         self,
@@ -48,12 +89,9 @@ class Trial:
         provider: BaseProvider | None = None,
         tool_calls: list[ToolCall] | None = None,
     ) -> Trial:
-        if isinstance(response, str):
-            text = response
-        elif hasattr(response, "text"):
-            text = response.text
-        else:
-            text = str(response)
+        text = normalize_response(response)
+        if tool_calls is None:
+            tool_calls = _extract_tool_calls(response)
         return cls(
             user_message=user_message,
             assistant_response=text,
@@ -112,12 +150,7 @@ class Trial:
             )
         if isinstance(agent, str):
             return self._call_endpoint(agent)
-        result = agent(self._user_message)
-        if isinstance(result, str):
-            return result
-        if hasattr(result, "text"):
-            return result.text
-        return str(result)
+        return normalize_response(agent(self._user_message))
 
     def _call_endpoint(self, url: str) -> str:
         import json
