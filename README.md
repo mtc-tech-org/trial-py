@@ -1,23 +1,8 @@
-# Trial
+# trial
 
 **Put your AI agents on trial.**
 
-A Python framework for testing AI responses with deterministic assertions and an LLM judge.
-
----
-
-## Why Trial
-
-Most AI eval tools are vague, hard to trust, or tied to a specific framework.
-
-Trial lets you:
-- Assert exact behavior with text, regex, tool call, and JSON checks
-- Enforce quality with a strict LLM judge
-- Test multi-turn conversations end-to-end
-- Fail fast on regressions
-- Work with any AI system — Claude, OpenAI, LangChain, or your own
-
-No lock-in. Just input → output → verdict.
+A Python framework for testing AI behavior with deterministic assertions, tool-call checks, and an LLM judge.
 
 ---
 
@@ -32,27 +17,25 @@ With providers:
 ```bash
 pip install "trial[anthropic]"
 pip install "trial[openai]"
-pip install "trial[json]"      # JSON schema validation
+pip install "trial[json]"
 pip install "trial[all]"
 ```
 
 ---
 
-## Quick Example
+## 30-second example
 
 ```python
-import trial
+from trial import Trial, configure
 from trial.providers import AnthropicProvider
 
-# Configure once — provider for the judge, agent under test
-trial.configure(
+configure(
     provider=AnthropicProvider(model="claude-sonnet-4-6"),
     agent=my_agent.run,
 )
 
-# Trial calls your agent automatically, then evaluates the response
 result = (
-    trial.Trial(user_message="Give me a quick pasta recipe for two people")
+    Trial("Give me a pasta recipe for two")
     .contains_text("spaghetti")
     .regex(r"Serves \d+")
     .passes_judge("Returns a pasta recipe with a name and list of ingredients")
@@ -60,18 +43,33 @@ result = (
 )
 
 assert result.passed
-print(result.score)    # 0.95
-print(result.reason)   # "Recipe includes name and full ingredient list"
-print(result.missing)  # []
 ```
 
 ---
 
-## How It Works
+## Why trial
 
-Each test puts your AI system on trial:
+Most AI eval tools:
+- are vague
+- are hard to trust
+- or are tied to a specific framework
 
-**1. Evidence** — deterministic checks run first (fast, cheap, no LLM)
+Trial is different:
+- deterministic checks for exact behavior
+- strict LLM judge for semantic quality
+- tool-call assertions for agent correctness
+- multi-turn testing for real conversations
+- works with any AI system
+
+No lock-in. Just input → output → verdict.
+
+---
+
+## Core idea
+
+Every test has three layers:
+
+**1. Evidence** — fast, deterministic, no LLM
 
 ```python
 .contains_text("spaghetti")
@@ -81,13 +79,18 @@ Each test puts your AI system on trial:
 .syntactically_valid("python")
 ```
 
-**2. Judgement** — an LLM evaluates semantic quality against your criterion
+**2. Judgement** — LLM evaluation against a strict criterion
 
 ```python
 .passes_judge("Returns a pasta recipe with a name and list of ingredients")
 ```
 
-**3. Verdict** — a structured result you can assert on
+Strict by design:
+- does not infer missing information
+- partial answers fail
+- returns structured output
+
+**3. Verdict**
 
 ```python
 result.passed    # True / False
@@ -98,171 +101,128 @@ result.missing   # what was absent
 
 ---
 
-## Assertions
+## Works with any AI system
 
-### Text and regex
+Trial evaluates plain inputs and outputs.
 
-```python
-Trial(user_msg, response)
-    .contains_text("spaghetti")       # case-insensitive substring
-    .regex(r"Serves \d+")             # re.search pattern
-    .run()
-```
-
-### Tool calls
-
-Assert that your agent called the right tools with the right inputs.
-
-Normalize tool calls directly from the provider response:
+**Auto-call your agent**
 
 ```python
-# From Anthropic
-response = anthropic_agent.run("Give me a pasta recipe for two")
-tool_calls = [ToolCall.from_anthropic(block) for block in response.content if block.type == "tool_use"]
-
-# From OpenAI
-response = openai_agent.run("Give me a pasta recipe for two")
-tool_calls = [ToolCall.from_openai(tc) for tc in response.choices[0].message.tool_calls]
-```
-
-Then assert on them:
-
-```python
-Trial(
-    user_message="Give me a pasta recipe for two",
-    assistant_response=response.text,
-    tool_calls=tool_calls,
-)
-.called_tool("search_recipe")
-.called_tool_with("get_nutrition", input_contains={"dish": "spaghetti-aglio"})
-.run()
-```
-
-### JSON structure
-
-Validate that the response is valid, structured JSON:
-
-```python
-Trial(user_msg, response)
-    .json_schema({"type": "object", "required": ["title", "ingredients"]})
-    .json_path("$.title", contains="Spaghetti")
-    .json_path("$.title", equals="Spaghetti Aglio e Olio")
-    .run()
-```
-
-Requires: `pip install "trial[json]"`
-
-### Code validity
-
-Assert that generated code is syntactically correct:
-
-```python
-Trial(user_msg, generated_code)
-    .syntactically_valid("python")
-    .passes_judge("Implements a function that scales a recipe by number of servings")
-    .run()
-```
-
-### LLM Judge
-
-```python
-.passes_judge("Returns a pasta recipe with a name and list of ingredients")
-.passes_judge("Response is in the same language as the question")
-.passes_judge("Includes preparation time and serving size", min_score=0.9)
-```
-
-The judge is intentionally strict:
-- Does not infer missing information
-- Partial answers fail
-- Returns a score, reason, and list of missing elements
-
-```
-Scoring:
-  1.0   Fully satisfies the criterion
-  0.7+  Minor gaps
-  0.4+  Important gaps
-  0.0+  Incorrect or irrelevant
-```
-
----
-
-## Multi-Turn Conversations
-
-Test full conversations end-to-end by recording turns as they happen:
-
-```python
-from trial import Conversation, Turn, ToolCall
-
-turns = []
-for user_msg in ["Give me a pasta recipe", "How many calories does it have?"]:
-    response = my_agent.run(user_msg)
-    turns.append(Turn(
-        user=user_msg,
-        assistant=response.text,
-        tool_calls=[ToolCall.from_anthropic(tc) for tc in response.tool_uses],
-    ))
-
-result = (
-    Conversation(turns)
-    .passes_judge("Agent used search tool and correctly provided a calorie estimate when asked")
-    .run()
-)
-
-assert result.passed
-```
-
----
-
-## Works With Any Framework
-
-Trial evaluates plain strings. It doesn't care where your response came from.
-
-**Recommended: configure the agent globally**
-
-```python
-trial.configure(
+configure(
     provider=AnthropicProvider(model="claude-sonnet-4-6"),
-    agent=my_agent.run,   # any callable that takes a string and returns a string
+    agent=my_agent.run,
 )
 
-# Now every Trial() calls the agent automatically
-Trial(user_message="Give me a pasta recipe").passes_judge("Returns a recipe").run()
+Trial("Give me a pasta recipe").passes_judge("Returns a recipe").run()
 ```
 
-**Or pass an HTTP endpoint**
+**HTTP endpoint**
 
 ```python
-trial.configure(
+configure(
     provider=AnthropicProvider(model="claude-sonnet-4-6"),
     agent="http://localhost:8000/chat",   # POST {message: ...}, expects {response: ...}
 )
 ```
 
-**Or provide the response manually**
-
-Useful when your agent returns structured data alongside the text:
+**Manual response**
 
 ```python
 response = agent.run("Give me a pasta recipe")
 
 Trial.from_response(
     user_message="Give me a pasta recipe",
-    response=response,     # str or object with .text
-    tool_calls=[ToolCall.from_anthropic(tc) for tc in response.tool_uses],
+    response=response,
 ).passes_judge("Returns a recipe with ingredients").run()
+```
+
+---
+
+## Tool call assertions
+
+Verify your agent actually did the right thing:
+
+```python
+Trial(..., tool_calls=tool_calls)
+    .called_tool("search_recipe")
+    .called_tool_with("get_nutrition", input_contains={"dish": "spaghetti"})
+    .run()
+```
+
+Normalize tool calls from any provider:
+
+```python
+# Anthropic
+tool_calls = [ToolCall.from_anthropic(b) for b in response.content if b.type == "tool_use"]
+
+# OpenAI
+tool_calls = [ToolCall.from_openai(tc) for tc in response.choices[0].message.tool_calls]
+```
+
+---
+
+## JSON assertions
+
+```python
+Trial(user_msg, response)
+    .json_schema({"type": "object", "required": ["title", "ingredients"]})
+    .json_path("$.title", contains="Spaghetti")
+    .run()
+```
+
+Requires: `pip install "trial[json]"`
+
+---
+
+## Code validation
+
+```python
+Trial(user_msg, code)
+    .syntactically_valid("python")
+    .run()
+```
+
+---
+
+## Multi-turn conversations
+
+```python
+from trial import Conversation, Turn
+
+Conversation([
+    Turn(user="Give me a recipe", assistant="..."),
+    Turn(user="How many calories?", assistant="..."),
+])
+.passes_judge("Agent follows up correctly and answers both questions")
+.run()
+```
+
+---
+
+## Strict judge
+
+Trial's judge is intentionally strict:
+- no guessing
+- no partial credit for missing key information
+- fails incomplete answers
+
+```
+Score:
+  1.0   correct
+  0.7   minor gaps
+  0.4   major gaps
+  0.0   incorrect
 ```
 
 ---
 
 ## Configuration
 
-Configure once at the top of your test file or `conftest.py`:
-
 ```python
-trial.configure(provider=AnthropicProvider(model="claude-sonnet-4-6"))
+configure(provider=AnthropicProvider(model="claude-sonnet-4-6"))
 ```
 
-Override per test if needed:
+Override per test:
 
 ```python
 Trial(..., provider=OpenAIProvider(model="gpt-4o"))
@@ -270,20 +230,12 @@ Trial(..., provider=OpenAIProvider(model="gpt-4o"))
 
 ---
 
-## Running Tests
+## Testing
 
 ```bash
-# Unit tests (no API key needed)
 pytest tests/ -m "not integration"
 
-# Integration tests
-ANTHROPIC_API_KEY=sk-... pytest tests/ -m integration
-```
-
-With Docker:
-
-```bash
-docker compose run eval pytest tests/ -m "not integration"
+ANTHROPIC_API_KEY=... pytest -m integration
 ```
 
 ---
@@ -291,7 +243,7 @@ docker compose run eval pytest tests/ -m "not integration"
 ## Roadmap
 
 - Latency assertions (TTFT, completion time)
-- CI integrations
+- CI integration
 - TypeScript SDK
 
 ---
