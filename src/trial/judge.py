@@ -47,8 +47,13 @@ def evaluate(
 
     raw = provider.complete(system=_SYSTEM_PROMPT, user=user_prompt)
 
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[-1]
+        cleaned = cleaned.rsplit("```", 1)[0].strip()
+
     try:
-        data = json.loads(raw)
+        data = json.loads(cleaned)
     except json.JSONDecodeError as e:
         raise ValueError(f"Judge returned malformed JSON: {e}\nRaw response: {raw!r}")
 
