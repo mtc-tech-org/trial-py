@@ -231,6 +231,55 @@ def test_conversation_no_checks():
     assert result.score == 1.0
 
 
+# --- NDCG retrieval assertions ---
+
+RELEVANCE = {"doc_a": 3.0, "doc_b": 2.0, "doc_c": 1.0, "doc_d": 0.0}
+
+
+def test_retrieval_ndcg_perfect_ranking():
+    ranked = ["doc_a", "doc_b", "doc_c", "doc_d"]
+    result = Trial(USER_MSG, RESPONSE).retrieval_ndcg(ranked, RELEVANCE, k=4, threshold=0.99).run()
+    assert result.passed
+
+
+def test_retrieval_ndcg_worst_ranking():
+    ranked = ["doc_d", "doc_c", "doc_b", "doc_a"]
+    result = Trial(USER_MSG, RESPONSE).retrieval_ndcg(ranked, RELEVANCE, k=4, threshold=0.9).run()
+    assert not result.passed
+    assert any("NDCG@4" in f for f in result.assertion_failures)
+
+
+def test_retrieval_ndcg_above_threshold():
+    ranked = ["doc_a", "doc_b", "doc_c"]
+    result = Trial(USER_MSG, RESPONSE).retrieval_ndcg(ranked, RELEVANCE, k=3, threshold=0.5).run()
+    assert result.passed
+
+
+def test_retrieval_ndcg_fails_alongside_other_checks():
+    ranked = ["doc_d", "doc_c", "doc_b", "doc_a"]
+    result = (
+        Trial(USER_MSG, RESPONSE)
+        .contains_text("spaghetti")
+        .retrieval_ndcg(ranked, RELEVANCE, k=4, threshold=0.99)
+        .run()
+    )
+    assert not result.passed
+    assert any("NDCG@4" in f for f in result.assertion_failures)
+
+
+def test_retrieval_ndcg_zero_relevance():
+    ranked = ["doc_x", "doc_y"]
+    result = Trial(USER_MSG, RESPONSE).retrieval_ndcg(ranked, {}, k=5, threshold=0.5).run()
+    assert not result.passed
+    assert any("NDCG@5" in f for f in result.assertion_failures)
+
+
+def test_retrieval_ndcg_unknown_docs_score_zero():
+    ranked = ["doc_unknown", "doc_a"]
+    result = Trial(USER_MSG, RESPONSE).retrieval_ndcg(ranked, RELEVANCE, k=2, threshold=0.01).run()
+    assert result.passed
+
+
 # --- from_response with tool_calls ---
 
 def test_from_response_with_tool_calls():

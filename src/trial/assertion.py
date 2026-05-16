@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from . import judge as _judge
 from .config import get_agent, get_provider
+from .ndcg import ndcg as _ndcg
 from .providers.base import BaseProvider
 from .result import TrialResult
 from .tools import ToolCall
@@ -89,6 +90,7 @@ class Trial:
         self._no_errors_check: bool = False
         self._after_checks: list[tuple[str, Callable[[], bool]]] = []
         self._judge_checks: list[tuple[str, float]] = []
+        self._ndcg_checks: list[tuple[list[str], dict[str, float], int, float]] = []
 
     @classmethod
     def from_response(
@@ -200,6 +202,29 @@ class Trial:
 
     def passes_judge(self, criterion: str, min_score: float = 0.7) -> Trial:
         self._judge_checks.append((criterion, min_score))
+        return self
+
+    def retrieval_ndcg(
+        self,
+        ranked_ids: list[str],
+        relevance: dict[str, float],
+        k: int = 10,
+        threshold: float = 0.5,
+    ) -> Trial:
+        """Assert that the retrieval ranking achieves at least *threshold* NDCG@K.
+
+        Args:
+            ranked_ids: Ordered list of document IDs as returned by the retrieval
+                system (highest-ranked first).
+            relevance: Ground-truth relevance grades ``{document_id: grade}`` where
+                grade is typically 0 (irrelevant), 1 (marginal), 2 (relevant),
+                3 (ideal). Grades may be any non-negative float.
+            k: Rank cutoff (default 10). Only the top-k positions contribute to
+                the score.
+            threshold: Minimum acceptable NDCG@K score in [0, 1] (default 0.5).
+                The assertion fails if the computed score falls below this value.
+        """
+        self._ndcg_checks.append((ranked_ids, relevance, k, threshold))
         return self
 
     def _effective_metrics(self) -> dict[str, float]:
@@ -321,6 +346,13 @@ class Trial:
                 )
             elif value > threshold:
                 failures.append(f"{label}: {value:.2f}s exceeded limit of {threshold:.2f}s")
+
+        for ranked_ids, relevance, k, threshold in self._ndcg_checks:
+            score = _ndcg(ranked_ids, relevance, k)
+            if score < threshold:
+                failures.append(
+                    f"NDCG@{k}={score:.4f} is below threshold {threshold:.2f}"
+                )
 
         if not self._judge_checks:
             passed = len(failures) == 0
